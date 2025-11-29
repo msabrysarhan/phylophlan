@@ -562,7 +562,6 @@ def mash_sketch_aa(genome_to_faa, sketch_dir, nproc_cpu, nproc_io, sketch_size=1
     run_parallel(run_command_with_output_file, commands, nproc_io, chunksize='auto', ordered=False, star=True)
     return sketch_files
 
-
 def skani_sketch(genome_ids, genome_extension, genomes_dir, sketch_dir, nproc_cpu, nproc_io):
     threads_per_run = get_threads_per_run(nproc_cpu, nproc_io)
 
@@ -571,10 +570,54 @@ def skani_sketch(genome_ids, genome_extension, genomes_dir, sketch_dir, nproc_cp
         if tmp_dir_.exists():
             shutil.rmtree(tmp_dir_)
         run_command(f"skani sketch -t {threads_per_run} -o {tmp_dir_} {genome_file_}")
-        os.rename(tmp_dir_ / f'{g_}{genome_extension}.sketch', sketch_file_)
-        os.unlink(tmp_dir_ / "markers.bin")
-        os.rmdir(tmp_dir_)
 
+        # 1) Prefer explicit .sketch files if produced
+        sketch_candidates = list(tmp_dir_.glob('*.sketch'))
+        candidate = None
+        if len(sketch_candidates) == 1:
+            candidate = sketch_candidates[0]
+        elif len(sketch_candidates) > 1:
+            warning(f"Multiple .sketch files found in {tmp_dir_}; picking {sketch_candidates[0].name}")
+            candidate = sketch_candidates[0]
+        else:
+            # 2) Fallback: some skani versions write a sketches.db (and index.db, markers.bin) instead
+            sketches_db = tmp_dir_ / 'sketches.db'
+            if sketches_db.exists():
+                # move the DB to the expected .sketch path (downstream code only needs a file with .sketch extension)
+                try:
+                    os.rename(sketches_db, sketch_file_)
+                    candidate = None  # already moved; signal that no further rename is needed
+                except OSError as e:
+                    raise Exception(f"Failed to move {sketches_db} to {sketch_file_}: {e}")
+            else:
+                # 3) Try expected names used by older/newer skani variants
+                expected_with_ext = tmp_dir_ / f'{g_}{genome_extension}.sketch'
+                expected_no_ext = tmp_dir_ / f'{g_}.sketch'
+                if expected_with_ext.exists():
+                    candidate = expected_with_ext
+                elif expected_no_ext.exists():
+                    candidate = expected_no_ext
+                else:
+                    # helpful debugging information
+                    existing = [p.name for p in tmp_dir_.iterdir()] if tmp_dir_.exists() else []
+                    raise Exception(f"skani did not produce a .sketch file in {tmp_dir_}. Files found: {existing}")
+
+        if candidate is not None:
+            os.rename(candidate, sketch_file_)
+
+        markers = tmp_dir_ / "markers.bin"
+        if markers.exists():
+            try:
+                os.unlink(markers)
+            except OSError:
+                pass
+        try:
+            tmp_dir_.rmdir()
+        except OSError:
+            try:
+                shutil.rmtree(tmp_dir_)
+            except OSError:
+                warning(f"Could not remove temporary sketch directory {tmp_dir_}")
 
     f_args = []
     reused = []
@@ -591,7 +634,6 @@ def skani_sketch(genome_ids, genome_extension, genomes_dir, sketch_dir, nproc_cp
 
         if genome_extension.endswith('.gz') or genome_extension.endswith('.bz2'):
             raise NotImplemented('We need to implement decompression for skani sketch')
-
 
         f_args.append([sketch_dir, genome_file, sketch_file, g])
 
